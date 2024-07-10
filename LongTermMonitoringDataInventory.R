@@ -213,15 +213,17 @@ smp_buff <- st_buffer(smp_sf, dist = 75)
 #intersect with gravity mains
 smp_main_int <- st_intersection(gravmain,smp_buff)
 
-
+smp_main_int <- smp_main_int %>% dplyr::mutate(buffer_dist_ft = coalesce(Diameter/24, Width/24)) %>%
+                                 dplyr::filter(!is.na(buffer_dist_ft))
+ 
 
 # Iterate through to grab the best option for each smp
 
 # variable frame
-smp_data <- as.data.frame(matrix(nrow = 1, ncol = 11))
+smp_data <- as.data.frame(matrix(nrow = 1, ncol = 12))
 
 colnames(smp_data) <- c("SMP_OBJECTID", "SEWER_OBJECTID", "smp_id","system_id","SMP_TYPE","X_STATEPLANE", "Y_STATEPLANE",
-                        "DOWNSTREAM_MANHOLEID","SEWER_MATERIAL","SEWER_YEAR", "UpstreamVegetation")
+                        "DOWNSTREAM_MANHOLEID","SEWER_MATERIAL","SEWER_YEAR", "SEWER_DISTANCE_FT","UPSTREAM_VEGETATION")
 
 
 for (i in 1:nrow(pub_smp_sf)){
@@ -239,7 +241,7 @@ for (i in 1:nrow(pub_smp_sf)){
     # fill up the row
     smp_data[i,] <- c(pub_smp_sf$OBJECTID[i], min_swr$OBJECTID, smp_x, sys_x, pub_smp_sf$SMP_TYPE[i],
                       pub_smp_sf$X_STATEPLANE[i], pub_smp_sf$Y_STATEPLANE[i], pub_smp_sf$DOWNSTREAM_MANHOLEID[i],
-                      NA, NA, NA)
+                      NA, NA, NA, NA)
     
     
   } else {
@@ -247,6 +249,8 @@ for (i in 1:nrow(pub_smp_sf)){
     dist_x <- st_distance(pub_smp_sf[i,], swr_x) %>% as.vector
     swr_x$distance_ft <- dist_x
     min_swr <- swr_x %>% dplyr::filter(distance_ft == min(dist_x))
+    
+    swr_x <- st_buffer(swr_x, dist = swr_x$buffer_dist_ft)
     
     # select first if identical distances
     min_swr <- min_swr[1,]
@@ -265,7 +269,7 @@ for (i in 1:nrow(pub_smp_sf)){
     # fill up the row
     smp_data[i,] <- c(pub_smp_sf$OBJECTID[i], min_swr$OBJECTID, smp_x, sys_x, pub_smp_sf$SMP_TYPE[i],
                       pub_smp_sf$X_STATEPLANE[i], pub_smp_sf$Y_STATEPLANE[i], pub_smp_sf$DOWNSTREAM_MANHOLEID[i],
-                      min_swr$Material, min_swr$Year_Installed, upstream)
+                      min_swr$Material, min_swr$Year_Installed, min_swr$distance_ft, upstream)
   }
   
 
@@ -278,7 +282,7 @@ cipit_data <- dbGetQuery(mars_con, "select * from external.tbl_cipit_project")
 ow_assets <- dbGetQuery(mars_con, "select * from external.mat_assets where asset_type = 'Observation Well'")
 
 #trim to stuff we want
-grnit_sys_join <- grnit_sys_data %>% dplyr::select(worknumber, system_id, sys_lrimpervda_ft2, sys_creditedstormsizemanaged_in)
+grnit_sys_join <- grnit_sys_data %>% dplyr::select(worknumber, system_id, sys_lrimpervda_ft2, sys_creditedstormsizemanaged_in, sys_sysfunction)
 cipit_join <- cipit_data %>% dplyr::select(worknumber, construction_start_date, construction_complete_date)
 
 # fill in con complete gaps
@@ -290,6 +294,90 @@ cipit_join <- cipit_join %>% dplyr::mutate(construction_complete_year = dplyr::c
 smp_data <- smp_data %>% left_join(grnit_sys_join, by = "system_id") %>%
                          left_join(cipit_join, by = "worknumber")
 
+# it's infiltrating, has potential for a subsurface component, and has an observation well
+infil_smp_data <- smp_data %>% dplyr::filter(sys_sysfunction == "Infiltration") %>%
+                               dplyr::filter(SMP_TYPE %in% smp_sub) %>%
+                               dplyr::filter(smp_id %in% ow_assets$smp_id)
+
+infil_smp_data$SEWER_DISTANCE_FT <- infil_smp_data$SEWER_DISTANCE_FT %>% as.numeric
+infil_smp_data$SEWER_YEAR <- infil_smp_data$SEWER_YEAR %>% as.numeric
+infil_smp_data$SEWER_YEAR[infil_smp_data$SEWER_YEAR == 9999] <- NA
+infil_smp_data$SEWER_AGE <- 2024 - infil_smp_data$SEWER_YEAR
+
+##### Short-circuiting categorization #####
+infil_smp_data$SEWER_DISTANCE_FT %>% median(na.rm = TRUE)
+infil_smp_data$SEWER_DISTANCE_FT %>% mean(na.rm = TRUE)
+infil_smp_data$SEWER_DISTANCE_FT %>% sd(na.rm = TRUE)
+hist(infil_smp_data$SEWER_DISTANCE_FT)
+
+infil_smp_data$SEWER_AGE %>% median(na.rm = TRUE)
+infil_smp_data$SEWER_AGE %>% mean(na.rm = TRUE)
+infil_smp_data$SEWER_AGE %>% sd(na.rm = TRUE)
+hist(infil_smp_data$SEWER_AGE)
+
+
+# Define quantile cutoffs
+high_age <- quantile(infil_smp_data$SEWER_AGE, na.rm = TRUE)[4]
+mid_age <- quantile(infil_smp_data$SEWER_AGE, na.rm = TRUE)[3]
+
+high_dist <- quantile(infil_smp_data$SEWER_DISTANCE_FT, na.rm = TRUE)[2]
+mid_dist <- quantile(infil_smp_data$SEWER_DISTANCE_FT, na.rm = TRUE)[3]
+
+#brick and mortar, most I&I
+high_mat <- c("BMP")
+#concrete, clay, terra cotta, mid I&I
+mid_mat <- c("CC","VCP","TCP")
+
+infil_smp_data$SHORT_CIRCUITING_SCORE <- 0
+infil_smp_data$SHORT_CIRCUITING_FLAG <- 0
+#Score each value
+for(i in 1:nrow(infil_smp_data)){
+
+  #DISTANCE
+  if(is.na(infil_smp_data$SEWER_DISTANCE_FT[i])){
+    infil_smp_data$SHORT_CIRCUITING_FLAG[i] <- infil_smp_data$SHORT_CIRCUITING_FLAG[i] + 1
+  } else
+  if(infil_smp_data$SEWER_DISTANCE_FT[i] <= high_dist){
+    infil_smp_data$SHORT_CIRCUITING_SCORE[i] <- infil_smp_data$SHORT_CIRCUITING_SCORE[i] + 2
+  } else
+  if(infil_smp_data$SEWER_DISTANCE_FT[i] <= mid_dist){
+    infil_smp_data$SHORT_CIRCUITING_SCORE[i] <- infil_smp_data$SHORT_CIRCUITING_SCORE[i] + 1
+  }
+
+  #AGE
+  if(is.na(infil_smp_data$SEWER_AGE[i])){
+    infil_smp_data$SHORT_CIRCUITING_FLAG[i] <- infil_smp_data$SHORT_CIRCUITING_FLAG[i] + 1 
+  } else
+  if(infil_smp_data$SEWER_AGE[i] >= high_age){
+    infil_smp_data$SHORT_CIRCUITING_SCORE[i] <- infil_smp_data$SHORT_CIRCUITING_SCORE[i] + 2
+  } else
+  if(infil_smp_data$SEWER_AGE[i] >= mid_age){
+    infil_smp_data$SHORT_CIRCUITING_SCORE[i] <- infil_smp_data$SHORT_CIRCUITING_SCORE[i] + 1
+  }
+  
+  #MATERIAL
+  if(is.na(infil_smp_data$SEWER_MATERIAL[i])){
+    infil_smp_data$SHORT_CIRCUITING_FLAG[i] <- infil_smp_data$SHORT_CIRCUITING_FLAG[i] + 1
+  } else
+  if(infil_smp_data$SEWER_MATERIAL[i] %in% high_mat){
+    infil_smp_data$SHORT_CIRCUITING_SCORE[i] <- infil_smp_data$SHORT_CIRCUITING_SCORE[i] + 2
+  } else
+  if(infil_smp_data$SEWER_MATERIAL[i] %in% mid_mat){
+    infil_smp_data$SHORT_CIRCUITING_SCORE[i] <- infil_smp_data$SHORT_CIRCUITING_SCORE[i] + 1
+  } else
+  if(infil_smp_data$SEWER_MATERIAL[i] == "Unknown"){
+    infil_smp_data$SHORT_CIRCUITING_FLAG[i] <- infil_smp_data$SHORT_CIRCUITING_FLAG[i] + 1
+  }    
+
+}
+
+##### Write the results #####
+
+
+infil_smp_data$clustering_batch <- 1
+
+results <- dbWriteTable(mars_con, DBI::SQL("metrics.tbl_longterm_cluster_variables"), infil_smp_data, append = TRUE, row.names = FALSE)
+
 # only subsurface systems with an observation well component
 
 ##### plot data #####
@@ -297,7 +385,7 @@ smp_data <- smp_data %>% left_join(grnit_sys_join, by = "system_id") %>%
 ggplot(city_poly) + geom_sf(fill = "honeydew3", alpha = 0.4) +
   geom_sf(data = cso_poly, fill = "grey45", alpha = 0.8) +
   # geom_sf(data = test_combine_buffer, fill = "red4") +
-  geom_sf(data = smp_xyz, fill = "red2") +
+  geom_sf(data = smp_main_int, col = "red2") +
   # geom_sf(data = greengrey_inlets, fill = "chartreuse4", shape = 22) +
   # geom_sf(data = gi_inlets, fill = "lightgreen", shape = 22) +
   # geom_sf(data = lat_buffer, fill = "chartreuse") +
@@ -322,12 +410,16 @@ lat_plot <- ggplot(cso_poly) + geom_sf(fill = "honeydew3", alpha = 0.7) +
 # leaflet map settup
 smp_polys <- tm_shape(lat_buffer) +
               tm_polygons(fill = "chartreuse2") +
-             tm_shape(greengrey_lat) +
+             tm_shape(smp_main_int) +
               tm_lines(col = "chartreuse4") +
              tm_shape(greengrey_inlets) +
               tm_dots(col = "seagreen") +
              tm_shape(smp_xyz, fill = "red4") +
               tm_polygons(fill = "red4")
+
+
+smp_polys <- tm_shape(buff_x) +
+             tm_polygons(fill = "green3")
 
 tmap_options(check.and.fix = TRUE)
 
@@ -355,65 +447,3 @@ tmap_leaflet(smp_polys)
 
 
 
-
-
-#### Working Document on Plan Review -- new crosstab table to replace existing ####
-
-# Plan Review Connection
-planreview <- dbConnect(odbc(), 
-                        Driver = "ODBC Driver 17 for SQL Server", 
-                        Server = "PWDSPRA", 
-                        Database = "SPRA_ReportingDB", 
-                        uid = Sys.getenv("gis_uid"),
-                        pwd= Sys.getenv("gis_pwd"))
-
-
-tryCatch({view_smp_designation <- dbGetQuery(planreview, "select p.spra_legacyprojectid as \"ProjectID\", s.spra_name as \"SMPID\", p.spra_projectname as \"Projectname\", p.spra_trackingid as \"TrackingNumber\",
-	d.Designation as \"Designation\", p.spra_smipfundedname as \"SMIP\", p.spra_garpfundedname as \"GARP\",
-	pt.spra_oowprogramtype as \"OOWProgramType\"
-from spra_project p inner join 
-	(select * from spra_projectsmpdetails s where s.spra_smptypename <> 'Site Characteristics') s
-		on p.spra_trackingid = s.spra_projectname
-	inner join View_Project_Designation d on p.spra_trackingid = d.TrackingNumber
-	left join spra_programtype pt on p.spra_programtypes = pt.spra_programtypeid
-order by p.spra_trackingid, s.spra_name")
-}, # append the data
-error = function(e){
-  kill <<- TRUE
-  errorCode <<- 2
-  errorCodes$message[errorCode+1] <<- e$message #Error object is a list
-  success <<- TRUE
-}
-)
-
-view_smp_designation <- dbGetQuery(planreview, "select p.spra_legacyprojectid as \"ProjectID\", s.spra_name as \"SMPID\", p.spra_projectname as \"Projectname\", p.spra_trackingid as \"TrackingNumber\",
-	d.Designation as \"Designation\", p.spra_smipfundedname as \"SMIP\", p.spra_garpfundedname as \"GARP\",
-	pt.spra_oowprogramtype as \"OOWProgramType\"
-from spra_project p inner join 
-	(select * from spra_projectsmpdetails s where s.spra_smptypename <> 'Site Characteristics') s
-		on p.spra_trackingid = s.spra_projectname
-	inner join View_Project_Designation d on p.spra_trackingid = d.TrackingNumber
-	left join spra_programtype pt on p.spra_programtypes = pt.spra_programtypeid
-order by p.spra_trackingid, s.spra_name")
-
-
-cross_tab_rework <-dbGetQuery(planreview,
-                              "select bv.SMPID as 'smp_id',
-                                      bv.DCIA_best as 'dcia_ft2',
-                                      bv.FootPrint_best as 'footprint_ft2',
-                                      -- psd.spra_orificediameter
-                                      bv.SlowReleaseVolume_best as 'slow_release_vol_ft3',
-                                      bv.WaterQualityVolume_best as 'water_quality_vol_ft3',
-                                      bv.StaticStorage_best as 'static_storage_vol_ft3',
-                                      bv.SysType_AP, bv.SysType_AB, bv.Systype_AM,
-                                      coalesce(bv.SysType_AM,bv.SysType_AB,bv.SysType_AP) as 'system_type'
-                               from View_SMP_BestValues bv
-                               -- left join spra_projectsmpdetails psd
-                               -- on bv.smp_id = psd.smp_id")
-
-testing <-dbGetQuery(planreview, "select * from View_HUB_PlanReview_SMP")
-
-
-cross_tab_cols <-dbGetQuery(planreview,
-                              "select *
-                               from View_SMP_BestValues bv")
