@@ -8,6 +8,7 @@ library(tmap)
 
 #### Database connection; database reading ####
 central_db <- dbConnect(odbc::odbc(), "CentralDB")
+mars_con <- dbConnect(odbc::odbc(), "mars14_datav2")
 
 
 # GISDB <- dbConnect(odbc(),
@@ -101,7 +102,7 @@ treetrench_poly <- ((st_read(dsn_infra_pub, query = "select * from gisad.gswiTre
   st_set_crs(2272) 
 
 wetland_poly <- ((st_read(dsn_infra_pub, query = "select * from gisad.gswiWetland", quiet = TRUE))) %>%
-  st_set_crs(2272) %>% st_transform(4326)  #Convert from PA State Plane to WGS 1984
+  st_set_crs(2272)  #Convert from PA State Plane to WGS 1984
 
 ##### Elevation Data Coverage ######
 ### Percentages for green/gray inlets ###
@@ -167,23 +168,136 @@ trench_poly$SMP_TYPE <- "Trench"
 treetrench_poly$SMP_TYPE <- "Tree Trench"
 wetland_poly$SMP_TYPE <- "Wetland"
 
-testmerge <- st_union(basin_poly, blueroof_poly) %>%
-              st_union(bumpout_poly) %>%
-              st_union(cistern_poly) %>%
-              st_union(dwell_poly) %>%
-              st_union(greenroof_poly) %>%
-              st_union(permpave_poly) %>%
-              st_union(planter_poly) %>%
-              st_union(raingarden_poly) %>%
-              st_union(trench_poly) %>%
-              st_union(treetrench_poly) %>%
-              st_union(wetland_poly)
+
+# create smp groupings of note
+smp_veg <- c("Basin", "Bumpout",  "Green Roof",
+             "Planter", "Rain Garden", "Swale",
+             "Wetland")
+
+# potential to have subsurface component
+smp_sub <- c("Basin", "Bumpout", "Permeable Pavement", "Planter", "Rain Garde",
+             "Trench","Tree Trench")
+
+# removed drainage well since it's not what we're looking at
+
+smp_sf_list <- list(basin_poly, blueroof_poly, bumpout_poly, cistern_poly,
+                    permpave_poly, planter_poly, raingarden_poly, swale_poly,
+                    trench_poly, treetrench_poly, wetland_poly)
+
+# we need the bare minimum from each SMP Type
+for(i in 1:length(smp_sf_list)){
+  
+  #One at a time
+  smp_x <- smp_sf_list[[i]]
+  smp_x <- smp_x %>% dplyr::select(OBJECTID, SMP_ID, SMP_TYPE, X_STATEPLANE, Y_STATEPLANE, DOWNSTREAM_MANHOLEID, GDB_GEOMATTR_DATA, SHAPE)
+  
+  smp_sf_list[[i]] <- smp_x
+  
+  print(paste0("Iteration: ",i,". Number of columns: ",ncol(smp_x),". SMP Type: ", smp_x$SMP_TYPE[1]))
+  }
+
+# simple version
+smp_sf <- sf::st_as_sf(data.table::rbindlist(smp_sf_list))
+
+#public smps
+pub_smp_sf <- smp_sf %>% dplyr::filter(grepl(SMP_ID, pattern = "\\d*-\\d*-\\d*"))
+
+
+# add columns for SMP number and system number
+pub_smp_sf$smp_number <- gsub(pub_smp_sf$SMP_ID, pattern = "\\d*-\\d*-", replacement = "")
+pub_smp_sf$system_id <- gsub(pub_smp_sf$SMP_ID, pattern = "-\\d*$", replacement = "")
+
+# buffer smp's
+smp_buff <- st_buffer(smp_sf, dist = 75)
+
+#intersect with gravity mains
+smp_main_int <- st_intersection(gravmain,smp_buff)
+
+
+
+# Iterate through to grab the best option for each smp
+
+# variable frame
+smp_data <- as.data.frame(matrix(nrow = 1, ncol = 11))
+
+colnames(smp_data) <- c("SMP_OBJECTID", "SEWER_OBJECTID", "smp_id","system_id","SMP_TYPE","X_STATEPLANE", "Y_STATEPLANE",
+                        "DOWNSTREAM_MANHOLEID","SEWER_MATERIAL","SEWER_YEAR", "UpstreamVegetation")
+
+
+for (i in 1:nrow(pub_smp_sf)){
+  
+  # grab smp id, system processing
+  smp_x <- pub_smp_sf$SMP_ID[i]
+  sys_x <- pub_smp_sf$system_id[i]
+  smp_numb_x <- pub_smp_sf$smp_number[i]
+  
+  # grab sewers within 50 ft
+  swr_x <- smp_main_int %>% dplyr::filter(SMP_ID == smp_x)
+  
+  if(nrow(swr_x) == 0){
+  # no sewer within 50 ft  
+    # fill up the row
+    smp_data[i,] <- c(pub_smp_sf$OBJECTID[i], min_swr$OBJECTID, smp_x, sys_x, pub_smp_sf$SMP_TYPE[i],
+                      pub_smp_sf$X_STATEPLANE[i], pub_smp_sf$Y_STATEPLANE[i], pub_smp_sf$DOWNSTREAM_MANHOLEID[i],
+                      NA, NA, NA)
+    
+    
+  } else {
+    #calculate distance
+    dist_x <- st_distance(pub_smp_sf[i,], swr_x) %>% as.vector
+    swr_x$distance_ft <- dist_x
+    min_swr <- swr_x %>% dplyr::filter(distance_ft == min(dist_x))
+    
+    # select first if identical distances
+    min_swr <- min_swr[1,]
+    
+    #upstream veg time
+    brothers <- pub_smp_sf %>% dplyr::filter(system_id == sys_x & smp_number != smp_numb_x)
+    if(nrow(brothers) == 0){
+      upstream <- FALSE
+    } else if(sum(brothers$smp_number < smp_numb_x) > 0){
+      older_siblings <- brothers[(brothers$smp_number < smp_numb_x),]
+      if(sum(older_siblings$SMP_TYPE %in% smp_veg) > 0){ upstream <- TRUE} else {upstream <- FALSE}
+    } else {
+      upstream <- FALSE
+    }
+    
+    # fill up the row
+    smp_data[i,] <- c(pub_smp_sf$OBJECTID[i], min_swr$OBJECTID, smp_x, sys_x, pub_smp_sf$SMP_TYPE[i],
+                      pub_smp_sf$X_STATEPLANE[i], pub_smp_sf$Y_STATEPLANE[i], pub_smp_sf$DOWNSTREAM_MANHOLEID[i],
+                      min_swr$Material, min_swr$Year_Installed, upstream)
+  }
+  
+
+}
+
+# join the greenit/cipit stuff
+grnit_smp_data <- dbGetQuery(mars_con, "select * from external.tbl_smpbdv")
+grnit_sys_data <- dbGetQuery(mars_con, "select * from external.tbl_systembdv")
+cipit_data <- dbGetQuery(mars_con, "select * from external.tbl_cipit_project")
+ow_assets <- dbGetQuery(mars_con, "select * from external.mat_assets where asset_type = 'Observation Well'")
+
+#trim to stuff we want
+grnit_sys_join <- grnit_sys_data %>% dplyr::select(worknumber, system_id, sys_lrimpervda_ft2, sys_creditedstormsizemanaged_in)
+cipit_join <- cipit_data %>% dplyr::select(worknumber, construction_start_date, construction_complete_date)
+
+# fill in con complete gaps
+cipit_join <- cipit_join %>% dplyr::mutate(construction_complete_year = dplyr::coalesce(
+                                             lubridate::year(construction_complete_date),
+                                             lubridate::year(construction_start_date + years(1))))
+  
+# tack cipit and greenit data on
+smp_data <- smp_data %>% left_join(grnit_sys_join, by = "system_id") %>%
+                         left_join(cipit_join, by = "worknumber")
+
+# only subsurface systems with an observation well component
 
 ##### plot data #####
 
 ggplot(city_poly) + geom_sf(fill = "honeydew3", alpha = 0.4) +
   geom_sf(data = cso_poly, fill = "grey45", alpha = 0.8) +
-  geom_sf(data = testmerge, fill = "red4") +
+  # geom_sf(data = test_combine_buffer, fill = "red4") +
+  geom_sf(data = smp_xyz, fill = "red2") +
   # geom_sf(data = greengrey_inlets, fill = "chartreuse4", shape = 22) +
   # geom_sf(data = gi_inlets, fill = "lightgreen", shape = 22) +
   # geom_sf(data = lat_buffer, fill = "chartreuse") +
@@ -200,35 +314,47 @@ lat_plot <- ggplot(cso_poly) + geom_sf(fill = "honeydew3", alpha = 0.7) +
   # geom_sf(data = greengrey_inlets, fill = "chartreuse4", shape = 22) +
   # geom_sf(data = gi_inlets, fill = "lightgreen", shape = 22) +
   geom_sf(data = greengrey_lat, col = "chartreuse4") +
-  geom_sf(data = treetrench_poly, col = "seagreen") +
-  geom_sf(data = trench_poly, col = "seagreen") +
-  geom_sf(data = basin_poly, col = "seagreen")
-  
+  geom_sf(data = smp_x, col = "seagreen")
 
 
 
 
-# # leaflet map settup 
-# smp_polys <- tm_shape(lat_buffer) +
-#               tm_polygons(fill = "chartreuse2") +
-#              tm_shape(greengrey_lat) +
-#               tm_lines(col = "chartreuse4") +
-#              tm_shape(greengrey_inlets) +
-#               tm_dots(col = "seagreen") +
-#              tm_shape(intersect_testing) +
-#               tm_lines(fill = "black") +
-#              tm_shape(all_trench_poly) +
-#               tm_polygons(fill = "red4")
-# 
-# 
-# # leaflet time
-# tmap_leaflet(smp_polys)
+# leaflet map settup
+smp_polys <- tm_shape(lat_buffer) +
+              tm_polygons(fill = "chartreuse2") +
+             tm_shape(greengrey_lat) +
+              tm_lines(col = "chartreuse4") +
+             tm_shape(greengrey_inlets) +
+              tm_dots(col = "seagreen") +
+             tm_shape(smp_xyz, fill = "red4") +
+              tm_polygons(fill = "red4")
+
+tmap_options(check.and.fix = TRUE)
+
+# leaflet time
+tmap_leaflet(smp_polys)
 
 # leaflet() %>%   setView(lat = 39.95, lng = -75.17, zoom=11.5) %>%
 #   addTiles(group="OSM") %>%
 #   addProviderTiles(providers$CartoDB.DarkMatter, group="Dark") %>%
 #   addProviderTiles(providers$CartoDB.Positron, group="Light") %>%
 #   addLayersControl(baseGroups=c('OSM','Dark','Light'))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 #### Working Document on Plan Review -- new crosstab table to replace existing ####
@@ -273,14 +399,19 @@ order by p.spra_trackingid, s.spra_name")
 
 cross_tab_rework <-dbGetQuery(planreview,
                               "select bv.SMPID as 'smp_id',
-                                      bv.FootPrint_best as 'footprint_ft2',
                                       bv.DCIA_best as 'dcia_ft2',
+                                      bv.FootPrint_best as 'footprint_ft2',
+                                      -- psd.spra_orificediameter
                                       bv.SlowReleaseVolume_best as 'slow_release_vol_ft3',
                                       bv.WaterQualityVolume_best as 'water_quality_vol_ft3',
                                       bv.StaticStorage_best as 'static_storage_vol_ft3',
                                       bv.SysType_AP, bv.SysType_AB, bv.Systype_AM,
                                       coalesce(bv.SysType_AM,bv.SysType_AB,bv.SysType_AP) as 'system_type'
-                               from View_SMP_BestValues bv")
+                               from View_SMP_BestValues bv
+                               -- left join spra_projectsmpdetails psd
+                               -- on bv.smp_id = psd.smp_id")
+
+testing <-dbGetQuery(planreview, "select * from View_HUB_PlanReview_SMP")
 
 
 cross_tab_cols <-dbGetQuery(planreview,
