@@ -50,6 +50,9 @@ greengrey_lat <- ((st_read(dsn_infra_pub, query = greengrey_lat_qry, quiet = TRU
 gravmain <- suppressWarnings((st_read(dsn_infra_pub, query = "SELECT * FROM gisad.wwGravityMain", quiet = TRUE))) %>%
   st_set_crs(2272) 
 
+stormmain <- suppressWarnings((st_read(dsn_infra_pub, query = "SELECT * FROM gisad.stGravityMain", quiet = TRUE))) %>%
+  st_set_crs(2272) 
+
 
 
 
@@ -199,6 +202,10 @@ for(i in 1:length(smp_sf_list)){
 # simple version
 smp_sf <- sf::st_as_sf(data.table::rbindlist(smp_sf_list))
 
+#combined/storm sewer combination
+gravmain <- gravmain %>% dplyr::select(-XSTREAM)
+sewermain <- sf::st_as_sf(data.table::rbindlist(list(gravmain,stormmain)))
+
 #public smps
 pub_smp_sf <- smp_sf %>% dplyr::filter(grepl(SMP_ID, pattern = "\\d*-\\d*-\\d*"))
 
@@ -208,10 +215,10 @@ pub_smp_sf$smp_number <- gsub(pub_smp_sf$SMP_ID, pattern = "\\d*-\\d*-", replace
 pub_smp_sf$system_id <- gsub(pub_smp_sf$SMP_ID, pattern = "-\\d*$", replacement = "")
 
 # buffer smp's
-smp_buff <- st_buffer(smp_sf, dist = 75)
+smp_buff <- st_buffer(smp_sf, dist = 250)
 
 #intersect with gravity mains
-smp_main_int <- st_intersection(gravmain,smp_buff)
+smp_main_int <- st_intersection(sewermain,smp_buff)
 
 smp_main_int <- smp_main_int %>% dplyr::mutate(buffer_dist_ft = coalesce(Diameter/24, Width/24)) %>%
                                  dplyr::filter(!is.na(buffer_dist_ft))
@@ -294,6 +301,8 @@ cipit_join <- cipit_join %>% dplyr::mutate(construction_complete_year = dplyr::c
 smp_data <- smp_data %>% left_join(grnit_sys_join, by = "system_id") %>%
                          left_join(cipit_join, by = "worknumber")
 
+smp_data <- smp_data %>% dplyr::filter(!is.na(worknumber))
+
 # it's infiltrating, has potential for a subsurface component, and has an observation well
 infil_smp_data <- smp_data %>% dplyr::filter(sys_sysfunction == "Infiltration") %>%
                                dplyr::filter(SMP_TYPE %in% smp_sub) %>%
@@ -319,14 +328,16 @@ hist(infil_smp_data$SEWER_AGE)
 # Define quantile cutoffs
 high_age <- quantile(infil_smp_data$SEWER_AGE, na.rm = TRUE)[4]
 mid_age <- quantile(infil_smp_data$SEWER_AGE, na.rm = TRUE)[3]
+quant_age <- quantile(infil_smp_data$SEWER_AGE, na.rm = TRUE)
 
 high_dist <- quantile(infil_smp_data$SEWER_DISTANCE_FT, na.rm = TRUE)[2]
 mid_dist <- quantile(infil_smp_data$SEWER_DISTANCE_FT, na.rm = TRUE)[3]
+quant_dist <- quantile(infil_smp_data$SEWER_DISTANCE_FT, na.rm = TRUE)
 
 #brick and mortar, most I&I
-high_mat <- c("BMP")
+high_mat <- c("BMP","VCP")
 #concrete, clay, terra cotta, mid I&I
-mid_mat <- c("CC","VCP","TCP")
+mid_mat <- c("CC","TCP")
 
 infil_smp_data$SHORT_CIRCUITING_SCORE <- 0
 infil_smp_data$SHORT_CIRCUITING_FLAG <- 0
@@ -371,10 +382,67 @@ for(i in 1:nrow(infil_smp_data)){
 
 }
 
+##### Counting the Data Coverage #####
+# total number
+smp_count <- nrow(infil_smp_data)
+
+# construction year
+missing_conyear <- is.na(infil_smp_data$construction_complete_year) %>% sum
+conyear_dcov <- (smp_count - missing_conyear)/smp_count
+
+# X and Y
+missing_x <- is.na(infil_smp_data$X_STATEPLANE) %>% sum
+missing_y <- is.na(infil_smp_data$Y_STATEPLANE) %>% sum
+x_dcov <- (smp_count - missing_x)/smp_count
+y_dcov <- (smp_count - missing_y)/smp_count
+
+# design storm
+missing_ds <- is.na(infil_smp_data$sys_creditedstormsizemanaged_in) %>% sum
+ds_dcov <- (smp_count - missing_ds)/smp_count
+
+# loading ratio
+missing_lr <- is.na(infil_smp_data$sys_lrimpervda_ft2) %>% sum
+lr_dcov <- (smp_count - missing_lr)/smp_count
+
+# upstream veg smp
+missing_upvs <- is.na(infil_smp_data$UPSTREAM_VEGETATION) %>% sum
+
+upvs_dcov <- (smp_count-missing_upvs)/smp_count
+
+# sewer plan distance
+missing_dist <- is.na(infil_smp_data$SEWER_DISTANCE_FT) %>% sum()
+distance_dcov <- (smp_count-missing_dist)/smp_count
+
+# sewer material
+missing_smat <- infil_smp_data$SEWER_MATERIAL %>% is.na %>% sum +
+                (infil_smp_data$SEWER_MATERIAL == "UNK") %>% sum(na.rm = TRUE)
+
+smat_dcov <- (smp_count-missing_smat)/smp_count
+
+# sewer age
+missing_sage <- is.na(infil_smp_data$SEWER_AGE) %>% sum
+
+sage_dcov <- (smp_count-missing_sage)/smp_count
+
+  
 ##### Write the results #####
 
+#Clean these columns
+colnames(infil_smp_data)
 
-infil_smp_data$clustering_batch <- 1
+# colnames(infil_smp_data) <- c("SMP_OBJECTID", "SEWER_OBJECTID", "smp_id", "system_id", "SMP_TYPE", "X_STATEPLANE", "Y_STATEPLANE", "DOWNSTREAM_MANHOLEID", "SEWER_MATERIAL", "SEWER_YEAR", "SEWER_DISTANCE_FT", "UPSTREAM_VEGETATION",          
+#                               "worknumber", "sys_lrimpervda_ft2", "sys_creditedstormsizemanaged_in", "sys_sysfunction", "construction_start_date",
+#                               "construction_complete_date", "construction_complete_year", "SEWER_AGE", "SHORT_CIRCUITING_SCORE", "SHORT_CIRCUITING_FLAG")
+
+colnames(infil_smp_data) <- c("smp_objectid", "sewer_objectid", "smp_id", "system_id", "smp_type", "x_stateplane", "y_stateplane", "downstream_manholeid", "sewer_material", "sewer_year", "sewer_distance_ft", "upstream_veg",          
+                              "worknumber", "sys_lrimpervda_ft2", "sys_creditedstormsizemanaged_in", "sys_sysfunction", "construction_start_date",
+                              "construction_complete_date", "construction_complete_year", "sewer_age", "short_circuiting_score", "short_circuiting_flag")
+
+last_batch <- dbGetQuery(mars_con, "select MAX(clustering_batch) as last_batch from metrics.tbl_longterm_cluster_variables") %>% pull
+
+
+infil_smp_data$clustering_batch <- last_batch + 1
+
 
 results <- dbWriteTable(mars_con, DBI::SQL("metrics.tbl_longterm_cluster_variables"), infil_smp_data, append = TRUE, row.names = FALSE)
 
@@ -406,6 +474,16 @@ lat_plot <- ggplot(cso_poly) + geom_sf(fill = "honeydew3", alpha = 0.7) +
 
 
 
+#boxplots
+dist_bplot <- ggplot(infil_smp_data, aes(y = SEWER_DISTANCE_FT)) +
+              geom_boxplot(lower = 0, middle  = high_dist, upper = mid_dist) +
+              theme_minimal() + ylab("Sewer Plan Distance from SMP (ft) ")
+
+age_bplot <- ggplot(infil_smp_data, aes(y = SEWER_AGE)) +
+             stat_boxplot(geom='errorbar', linetype=1, width=0.35)+  #whiskers
+             geom_boxplot(ymin = quant_age[1], lower = quant_age[2], middle = quant_age[3], upper = quant_age[4], ymax = quant_age[5]) +
+             geom_jitter(alpha = 0.5) + 
+             ylab("Sewer Age (yrs)") 
 
 # leaflet map settup
 smp_polys <- tm_shape(lat_buffer) +
