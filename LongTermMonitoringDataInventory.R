@@ -301,7 +301,7 @@ cipit_join <- cipit_join %>% dplyr::mutate(construction_complete_year = dplyr::c
 smp_data <- smp_data %>% left_join(grnit_sys_join, by = "system_id") %>%
                          left_join(cipit_join, by = "worknumber")
 
-smp_data <- smp_data %>% dplyr::filter(!is.na(worknumber))
+smp_data <- smp_data %>% dplyr::filter(!is.na(construction_complete_year))
 
 # it's infiltrating, has potential for a subsurface component, and has an observation well
 infil_smp_data <- smp_data %>% dplyr::filter(sys_sysfunction == "Infiltration") %>%
@@ -382,6 +382,9 @@ for(i in 1:nrow(infil_smp_data)){
 
 }
 
+# Add one point to the SC score for each flag
+infil_smp_data$SHORT_CIRCUITING_SCORE <-  infil_smp_data$SHORT_CIRCUITING_SCORE + infil_smp_data$SHORT_CIRCUITING_FLAG
+
 ##### Counting the Data Coverage #####
 # total number
 smp_count <- nrow(infil_smp_data)
@@ -450,30 +453,6 @@ results <- dbWriteTable(mars_con, DBI::SQL("metrics.tbl_longterm_cluster_variabl
 
 ##### plot data #####
 
-ggplot(city_poly) + geom_sf(fill = "honeydew3", alpha = 0.4) +
-  geom_sf(data = cso_poly, fill = "grey45", alpha = 0.8) +
-  # geom_sf(data = test_combine_buffer, fill = "red4") +
-  geom_sf(data = smp_main_int, col = "red2") +
-  # geom_sf(data = greengrey_inlets, fill = "chartreuse4", shape = 22) +
-  # geom_sf(data = gi_inlets, fill = "lightgreen", shape = 22) +
-  # geom_sf(data = lat_buffer, fill = "chartreuse") +
-  # geom_sf(data = greengrey_lat, col = "green3") + 
-  # geom_sf(data= intersect_test1, col = "black") +
-  # geom_sf(data = all_trench_poly, fill = "red4") +
-  theme_minimal()
-
-
-
-
-
-lat_plot <- ggplot(cso_poly) + geom_sf(fill = "honeydew3", alpha = 0.7) +
-  # geom_sf(data = greengrey_inlets, fill = "chartreuse4", shape = 22) +
-  # geom_sf(data = gi_inlets, fill = "lightgreen", shape = 22) +
-  geom_sf(data = greengrey_lat, col = "chartreuse4") +
-  geom_sf(data = smp_x, col = "seagreen")
-
-
-
 #boxplots
 dist_bplot <- ggplot(infil_smp_data, aes(y = SEWER_DISTANCE_FT)) +
               geom_boxplot(lower = 0, middle  = high_dist, upper = mid_dist) +
@@ -485,30 +464,11 @@ age_bplot <- ggplot(infil_smp_data, aes(y = SEWER_AGE)) +
              geom_jitter(alpha = 0.5) + 
              ylab("Sewer Age (yrs)") 
 
-# leaflet map settup
-smp_polys <- tm_shape(lat_buffer) +
-              tm_polygons(fill = "chartreuse2") +
-             tm_shape(smp_main_int) +
-              tm_lines(col = "chartreuse4") +
-             tm_shape(greengrey_inlets) +
-              tm_dots(col = "seagreen") +
-             tm_shape(smp_xyz, fill = "red4") +
-              tm_polygons(fill = "red4")
 
+score_hist <- ggplot(infil_smp_data, aes(x = short_circuiting_score)) + geom_histogram(bins = 7, col = "black", fill = "antiquewhite3") + theme_minimal() +
+              ylab("Count") + xlab("Short-Circuiting Score") + ggtitle("Short-Circuiting Score Histogram")
 
-smp_polys <- tm_shape(buff_x) +
-             tm_polygons(fill = "green3")
-
-tmap_options(check.and.fix = TRUE)
-
-# leaflet time
-tmap_leaflet(smp_polys)
-
-# leaflet() %>%   setView(lat = 39.95, lng = -75.17, zoom=11.5) %>%
-#   addTiles(group="OSM") %>%
-#   addProviderTiles(providers$CartoDB.DarkMatter, group="Dark") %>%
-#   addProviderTiles(providers$CartoDB.Positron, group="Light") %>%
-#   addLayersControl(baseGroups=c('OSM','Dark','Light'))
+ggsave(plot = score_hist, filename = "short-circuiting_score_histogram.png", width = 8, height = 4.5)
 
 
 
