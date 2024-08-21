@@ -35,7 +35,8 @@ head_vals <- dbGetQuery(planreview, "select       spra_name as 'smp_id',
                                                   coalesce(spra_stonestoragedepth_asmaintained/12, spra_stonestoragedepth_asbuilt/12, spra_stonestoragedepth_approved/12) as 'stone_storage_depth_ft',
                                                   coalesce(spra_footprint_asmaintained, spra_footprint_asbuilt, spra_footprint_approved) as 'footprint_ft2',
                                                   coalesce(spra_staticstorage_asmaintained, spra_staticstorage_asbuilt, spra_staticstorage_approved) as 'static_volume_ft3',
-                                                  coalesce(spra_waterqualityvolume_asmaintained, spra_waterqualityvolume_asbuilt, spra_waterqualityvolume_approved) as 'wq_volume_ft3'
+                                                  coalesce(spra_waterqualityvolume_asmaintained, spra_waterqualityvolume_asbuilt, spra_waterqualityvolume_approved) as 'wq_volume_ft3',
+                                                  coalesce(spra_testinfiltrationrate_asmaintained, spra_testinfiltrationrate_asbuilt, spra_testinfiltrationrate_approved) as 'infil_dsg_rate_inhr'
                                       from spra_projectsmpdetails s")  %>% 
               dplyr::mutate(wq_head_ft = wq_volume_ft3/footprint_ft2 ) %>%
               dplyr::mutate(static_head_ft = static_volume_ft3/footprint_ft2)  
@@ -48,7 +49,8 @@ cross_tab <-dbGetQuery(planreview,
                                       bv.WaterQualityVolume_best as 'water_quality_vol_ft3',
                                       bv.StaticStorage_best as 'static_storage_vol_ft3',
                                       bv.SysType_AP, bv.SysType_AB, bv.Systype_AM,
-                                      coalesce(bv.SysType_AM,bv.SysType_AB,bv.SysType_AP) as 'system_type'
+                                      coalesce(bv.SysType_AM,bv.SysType_AB,bv.SysType_AP) as 'system_type',
+                                      coalesce(bv.Loca_AM, bv.Loca_AB, bv.Loca_AP) as 'location'
                                from View_SMP_BestValues bv")
 
 
